@@ -39,7 +39,7 @@ mod tests {
         let (_, topics, data) = &id_events[0];
         assert_eq!(topics.len(), 1);
         let topic0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(topic0, symbol_short!("Init"));
+        assert_eq!(topic0, Symbol::new(&env, "Initialized"));
         let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
         assert_eq!(
             event_admin, admin,
@@ -57,7 +57,7 @@ mod tests {
         let (_, topics, data) = &credit_events[0];
         assert_eq!(topics.len(), 1);
         let topic1: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(topic1, symbol_short!("Init"));
+        assert_eq!(topic1, Symbol::new(&env, "Initialized"));
         let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
         assert_eq!(
             event_admin, admin,
@@ -79,7 +79,7 @@ mod tests {
         let (_, topics, data) = &rev_events[0];
         assert_eq!(topics.len(), 1);
         let topic2: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(topic2, symbol_short!("Init"));
+        assert_eq!(topic2, Symbol::new(&env, "Initialized"));
         let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
         assert_eq!(
             event_admin, admin,

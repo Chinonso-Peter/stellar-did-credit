@@ -444,7 +444,7 @@ impl CreditOracle {
             .instance()
             .set(&DataKey::StorageVersion, &2u32);
         env.events()
-            .publish((symbol_short!("Init"),), admin.clone());
+            .publish((Symbol::new(&env, "Initialized"),), admin.clone());
         Ok(())
     }
 
