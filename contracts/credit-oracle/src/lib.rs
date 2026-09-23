@@ -1796,6 +1796,49 @@ mod tests {
     }
 
     #[test]
+    fn test_score_formula_readme_example_rows() {
+        // Pins every "Example scores" row in README.md (and the worked
+        // examples in docs/scoring-spec.md) to compute_score_pure so the
+        // documentation can never drift from the implementation again.
+
+        // Mirrors how compute_score derives vc_points (20 per VC, cap 100) and
+        // the default weights (40/30/30).
+        let row = |vcs: u32,
+                   volume_xlm: u32,
+                   repaid_xlm: u32,
+                   counterparties: u32,
+                   on_time: u32,
+                   total: u32|
+         -> u32 {
+            compute_score_pure(
+                vcs.saturating_mul(20).min(100),
+                volume_xlm as i128 * 100_000_000,
+                counterparties,
+                on_time,
+                total,
+                repaid_xlm as i128 * 100_000_000,
+                40,
+                30,
+                30,
+            )
+        };
+
+        // Established profile from the issue acceptance criteria:
+        // 2 VCs, 20 XLM volume, 20 XLM repaid, 0 counterparties, 85% on-time.
+        assert_eq!(row(2, 20, 20, 0, 17, 20), 503);
+
+        // New user: 0 VCs, no volume, no repayment record.
+        assert_eq!(row(0, 0, 0, 0, 0, 0), 300);
+        // Early stage: 1 VC, 5 XLM volume/repaid, 0 counterparties, 70% on-time.
+        assert_eq!(row(1, 5, 5, 0, 7, 10), 410);
+        // Established: covered above.
+        // Strong: 3 VCs, 50 XLM volume/repaid, 5 counterparties, 95% on-time.
+        assert_eq!(row(3, 50, 50, 5, 19, 20), 630);
+        // Exceptional: maxed VCs, volume, repaid, and counterparties, 100% on-time.
+        assert_eq!(row(5, 100, 100, 100, 20, 20), 850);
+    }
+
+    #[test]
     fn test_default_weights_sum_to_100() {
         let env = Env::default();
         env.mock_all_auths();

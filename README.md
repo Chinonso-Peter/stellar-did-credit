@@ -172,12 +172,19 @@ Full deployment record: [deployments.testnet.json](deployments.testnet.json). Ru
 
 ## Scoring formula
 
-The credit score ranges from 300 (no history) to 850 (exceptional). It is computed from three weighted components:
+The credit score ranges from 300 (no history) to 850 (exceptional). It is computed from three weighted components, exactly as implemented by `compute_score_pure` in `contracts/credit-oracle/src/lib.rs` (all arithmetic uses integer division with truncation):
 
 ```
-vc_score    = min(vc_count × 20, 100)
-tx_score    = min(volume_30d_stroops ÷ 100_000_000, 100)   # 1 point per XLM, cap 100
-repay_score = (on_time_count × 10000 ÷ total_count) ÷ 100  # 0–100, integer division
+vc_points            = vc_count × 20                          # 20 points per verified VC
+vc_score             = min(vc_points, 100)
+
+volume_score         = clamp(volume_30d_stroops ÷ 100_000_000, 0, 80)   # 1 point per XLM, cap 80
+counterparty_bonus   = min(avg_counterparties ÷ 5, 20)                  # 1 point per 5 counterparties, cap 20
+tx_score             = min(volume_score + counterparty_bonus, 100)
+
+repayment_rate_score   = (on_time_count × 10000 ÷ total_count) ÷ 100   # 0–100; 0 when total_count = 0
+repayment_volume_score = clamp(total_repaid_stroops ÷ 100_000_000, 0, 100)  # 1 point per XLM, cap 100
+repay_score            = (repayment_rate_score + repayment_volume_score) ÷ 2
 
 composite   = (vc_score × vc_weight
              + tx_score × tx_weight
@@ -186,17 +193,17 @@ composite   = (vc_score × vc_weight
 final_score = clamp(300 + composite × 550 ÷ 100, 300, 850)
 ```
 
-Default weights: `vc_weight = 40`, `tx_weight = 30`, `repayment_weight = 30`
+Default weights: `vc_weight = 40`, `tx_weight = 30`, `repayment_weight = 30` (governed on-chain via `docs/governance.md`)
 
 **Example scores** (all arithmetic uses integer division, matching the contract):
 
-| Profile     | VCs | 30d Volume | Repayment rate | Score |
-| ----------- | --- | ---------- | -------------- | ----- |
-| New user    | 0   | 0 XLM      | —              | 300   |
-| Early stage | 1   | 5 XLM      | 70%            | 465   |
-| Established | 2   | 20 XLM     | 85%            | 558   |
-| Strong      | 3   | 50 XLM     | 95%            | 668   |
-| Exceptional | 5   | 100+ XLM   | 100%           | 850   |
+| Profile     | VCs | 30d Volume | Total repaid | Counterparties | Repayment rate | Score |
+| ----------- | --- | ---------- | ------------ | -------------- | -------------- | ----- |
+| New user    | 0   | 0 XLM      | 0 XLM        | 0              | —              | 300   |
+| Early stage | 1   | 5 XLM      | 5 XLM        | 0              | 70%            | 410   |
+| Established | 2   | 20 XLM     | 20 XLM       | 0              | 85%            | 503   |
+| Strong      | 3   | 50 XLM     | 50 XLM       | 5              | 95%            | 630   |
+| Exceptional | ≥5  | 100+ XLM   | 100+ XLM     | 100+           | 100%           | 850   |
 
 Full formula documentation with worked examples: [docs/scoring-spec.md](docs/scoring-spec.md)
 
@@ -624,7 +631,7 @@ Fetching credit score for GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 │  VC Count:                       3  │
 │  Repayment Rate:            8000 bps│
 │  TX Volume (30d):    1000.0000000 XLM│
-│  Previous Score:               558  │
+│  Previous Score:               503  │
 │  Computed at Ledger:       1234567  │
 │  Last Updated:      2026-07-01T00...│
 │  Stale:                      false  │
