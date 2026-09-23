@@ -114,6 +114,8 @@ Computes and stores credit scores based on on-chain data.
 | `deregister_feeder(admin, feeder)`                   | Revokes a trusted feeder (no retroactive effect)   |
 | `register_lender(admin, lender)`                     | Registers a trusted lender for repayment recording |
 | `deregister_lender(admin, lender)`                   | Revokes a trusted lender (no retroactive effect)   |
+| `list_feeders()`                                     | Returns all currently registered feeders           |
+| `list_lenders()`                                     | Returns all currently registered lenders           |
 | `update_tx_stats(feeder, subject, stats)`            | Updates 30-day transaction statistics              |
 | `record_repayment(lender, subject, amount, on_time)` | Records a loan repayment outcome                   |
 | `compute_score(subject)`                             | Computes and persists the credit score             |
