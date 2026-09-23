@@ -4,7 +4,7 @@
 //! Maintains an on-chain list of revoked verifiable credential hashes.
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
-    IntoVal, Vec,
+    IntoVal, Symbol, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ impl RevocationRegistry {
             .instance()
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.events()
-            .publish((symbol_short!("Init"),), admin);
+            .publish((Symbol::new(&env, "Initialized"),), admin);
         env.storage()
             .instance()
             .set(&RevocationKey::BatchLimit, &MAX_BATCH_SIZE);
