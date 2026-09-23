@@ -34,9 +34,14 @@ pub enum DataKey {
     Config,
     /// Registered weight for a VC credential type (default 100 when unset)
     VcWeight(Symbol),
-    /// Trusted feeder address authorized to update transaction stats
+    /// Whether the given address is a *currently* trusted transaction-stats
+    /// feeder. Present and `true` while registered; present and `false` once
+    /// deregistered (a tombstone, not removed) so re-registration can be told
+    /// apart from first-time registration without rescanning `FeedersIndex`;
+    /// absent if never registered.
     TrustedFeeder(Address),
-    /// Trusted lender address authorized to record repayments
+    /// Whether the given address is a *currently* trusted repayment-recording
+    /// lender. Tombstone semantics are identical to `TrustedFeeder`.
     TrustedLender(Address),
     /// Transaction statistics for a user
     TxStats(Address),
@@ -58,9 +63,17 @@ pub enum DataKey {
     ComputeCooldownLedgers,
     /// Aggregate protocol-level counters
     ProtocolStats,
-    /// Index of all registered feeders
+    /// Append-only index of every address ever registered as a trusted
+    /// feeder. Entries are never removed on deregistration (that would
+    /// require an O(n) rewrite on every `deregister_feeder` call) — a
+    /// deregistered feeder's entry is left in place and its `TrustedFeeder`
+    /// flag is set to `false` instead. Use `list_feeders` (which filters
+    /// this index against `TrustedFeeder`) to get the currently-active set.
     FeedersIndex,
-    /// Index of all registered lenders
+    /// Append-only index of every address ever registered as a trusted
+    /// lender. Entries are never removed on deregistration; use
+    /// `list_lenders` (which filters this index against `TrustedLender`)
+    /// to get the currently-active set.
     LendersIndex,
     /// Dispute record for a (subject, input_key) pair
     Dispute(Address, Symbol),
@@ -435,7 +448,14 @@ impl CreditOracle {
         Ok(())
     }
 
-    /// Register a trusted feeder address
+    /// Register a trusted feeder address.
+    ///
+    /// `FeedersIndex` is append-only: the address is pushed only when it is
+    /// not already in the index, so a deregister → re-register cycle never
+    /// duplicates the entry. The flag key is then set to `true`, which both
+    /// activates a fresh registration and clears a deregistration tombstone.
+    ///
+    /// Auth: admin only.
     pub fn register_feeder(
         env: Env,
         admin: Address,
@@ -451,23 +471,35 @@ impl CreditOracle {
         }
         admin.require_auth();
 
-        let feeder_key = DataKey::TrustedFeeder(feeder.clone());
-        if !env.storage().persistent().has(&feeder_key) {
-            let mut feeders: Vec<Address> = env
-                .storage()
-                .persistent()
-                .get(&DataKey::FeedersIndex)
-                .unwrap_or(Vec::new(&env));
-            feeders.push_back(feeder.clone());
-            let index_key = DataKey::FeedersIndex;
-            env.storage()
-                .persistent()
-                .set(&index_key, &feeders);
-            env.storage()
-                .persistent()
-                .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-        }
+        let index_key = DataKey::FeedersIndex;
+        let feeders: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&index_key)
+            .unwrap_or(Vec::new(&env));
 
+        // Append-only dedup: check index membership rather than flag-key
+        // presence. A tombstoned (deregistered) feeder still has its flag key,
+        // and a long-dormant flag can outlive — or predecease — its index
+        // entry as the two keys' TTLs are bumped independently, so `has()` on
+        // the flag is not a reliable "already indexed" test.
+        let mut already_indexed = false;
+        for addr in feeders.iter() {
+            if addr == feeder {
+                already_indexed = true;
+                break;
+            }
+        }
+        if !already_indexed {
+            let mut feeders = feeders;
+            feeders.push_back(feeder.clone());
+            env.storage().persistent().set(&index_key, &feeders);
+        }
+        env.storage()
+            .persistent()
+            .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+        let feeder_key = DataKey::TrustedFeeder(feeder.clone());
         env.storage().persistent().set(&feeder_key, &true);
         env.storage()
             .persistent()
@@ -476,7 +508,15 @@ impl CreditOracle {
         Ok(())
     }
 
-    /// Deregister a trusted feeder address
+    /// Deregister a trusted feeder address.
+    ///
+    /// Tombstones `TrustedFeeder` (sets it to `false`) instead of removing
+    /// the key, and leaves `FeedersIndex` untouched, so deregistration is a
+    /// single storage write instead of an O(n) scan + rewrite. The index
+    /// stays append-only; `list_feeders` returns the currently-active set by
+    /// filtering it against the flag.
+    ///
+    /// Auth: admin only.
     pub fn deregister_feeder(
         env: Env,
         admin: Address,
@@ -491,30 +531,25 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
+
+        let feeder_key = DataKey::TrustedFeeder(feeder.clone());
+        env.storage().persistent().set(&feeder_key, &false);
         env.storage()
             .persistent()
-            .remove(&DataKey::TrustedFeeder(feeder.clone()));
-
-        let ever_registered: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::FeedersIndex)
-            .unwrap_or(Vec::new(&env));
-
-        let mut compacted = Vec::new(&env);
-        for i in 0..ever_registered.len() {
-            let addr: Address = ever_registered.get(i).unwrap();
-            if env.storage().persistent().has(&DataKey::TrustedFeeder(addr.clone())) {
-                compacted.push_back(addr);
-            }
-        }
-        env.storage().persistent().set(&DataKey::FeedersIndex, &compacted);
+            .extend_ttl(&feeder_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 
         env.events().publish((symbol_short!("FdrDeReg"),), feeder);
         Ok(())
     }
 
-    /// Register a trusted lender address
+    /// Register a trusted lender address.
+    ///
+    /// `LendersIndex` is append-only: the address is pushed only when it is
+    /// not already in the index, so a deregister → re-register cycle never
+    /// duplicates the entry. The flag key is then set to `true`, which both
+    /// activates a fresh registration and clears a deregistration tombstone.
+    ///
+    /// Auth: admin only.
     pub fn register_lender(
         env: Env,
         admin: Address,
@@ -530,23 +565,32 @@ impl CreditOracle {
         }
         admin.require_auth();
 
-        let lender_key = DataKey::TrustedLender(lender.clone());
-        if !env.storage().persistent().has(&lender_key) {
-            let mut lenders: Vec<Address> = env
-                .storage()
-                .persistent()
-                .get(&DataKey::LendersIndex)
-                .unwrap_or(Vec::new(&env));
-            lenders.push_back(lender.clone());
-            let index_key = DataKey::LendersIndex;
-            env.storage()
-                .persistent()
-                .set(&index_key, &lenders);
-            env.storage()
-                .persistent()
-                .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-        }
+        let index_key = DataKey::LendersIndex;
+        let lenders: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&index_key)
+            .unwrap_or(Vec::new(&env));
 
+        // Append-only dedup — see `register_feeder` for why index membership,
+        // not flag-key presence, is the reliable "already indexed" test.
+        let mut already_indexed = false;
+        for addr in lenders.iter() {
+            if addr == lender {
+                already_indexed = true;
+                break;
+            }
+        }
+        if !already_indexed {
+            let mut lenders = lenders;
+            lenders.push_back(lender.clone());
+            env.storage().persistent().set(&index_key, &lenders);
+        }
+        env.storage()
+            .persistent()
+            .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+        let lender_key = DataKey::TrustedLender(lender.clone());
         env.storage().persistent().set(&lender_key, &true);
         env.storage()
             .persistent()
@@ -555,7 +599,15 @@ impl CreditOracle {
         Ok(())
     }
 
-    /// Deregister a trusted lender address
+    /// Deregister a trusted lender address.
+    ///
+    /// Tombstones `TrustedLender` (sets it to `false`) instead of removing
+    /// the key, and leaves `LendersIndex` untouched, so deregistration is a
+    /// single storage write instead of an O(n) scan + rewrite. The index
+    /// stays append-only; `list_lenders` returns the currently-active set by
+    /// filtering it against the flag.
+    ///
+    /// Auth: admin only.
     pub fn deregister_lender(
         env: Env,
         admin: Address,
@@ -570,24 +622,12 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
+
+        let lender_key = DataKey::TrustedLender(lender.clone());
+        env.storage().persistent().set(&lender_key, &false);
         env.storage()
             .persistent()
-            .remove(&DataKey::TrustedLender(lender.clone()));
-
-        let ever_registered: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::LendersIndex)
-            .unwrap_or(Vec::new(&env));
-
-        let mut compacted = Vec::new(&env);
-        for i in 0..ever_registered.len() {
-            let addr: Address = ever_registered.get(i).unwrap();
-            if env.storage().persistent().has(&DataKey::TrustedLender(addr.clone())) {
-                compacted.push_back(addr);
-            }
-        }
-        env.storage().persistent().set(&DataKey::LendersIndex, &compacted);
+            .extend_ttl(&lender_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 
         env.events().publish((symbol_short!("LndDeReg"),), lender);
         Ok(())
@@ -646,11 +686,12 @@ impl CreditOracle {
     ) -> Result<(), CreditOracleError> {
         ensure_not_paused(&env)?;
         feeder.require_auth();
-        if !env
+        let is_trusted: bool = env
             .storage()
             .persistent()
-            .has(&DataKey::TrustedFeeder(feeder.clone()))
-        {
+            .get(&DataKey::TrustedFeeder(feeder.clone()))
+            .unwrap_or(false);
+        if !is_trusted {
             return Err(CreditOracleError::FeederNotRegistered);
         }
         env.storage()
@@ -669,11 +710,12 @@ impl CreditOracle {
     ) -> Result<(), CreditOracleError> {
         ensure_not_paused(&env)?;
         lender.require_auth();
-        if !env
+        let is_trusted: bool = env
             .storage()
             .persistent()
-            .has(&DataKey::TrustedLender(lender.clone()))
-        {
+            .get(&DataKey::TrustedLender(lender.clone()))
+            .unwrap_or(false);
+        if !is_trusted {
             return Err(CreditOracleError::LenderNotRegistered);
         }
         let current_version: u32 = env
@@ -773,11 +815,12 @@ impl CreditOracle {
     ) -> Result<(), CreditOracleError> {
         ensure_not_paused(&env)?;
         feeder.require_auth();
-        if !env
+        let is_trusted: bool = env
             .storage()
             .persistent()
-            .has(&DataKey::TrustedFeeder(feeder.clone()))
-        {
+            .get(&DataKey::TrustedFeeder(feeder.clone()))
+            .unwrap_or(false);
+        if !is_trusted {
             return Err(CreditOracleError::FeederNotRegistered);
         }
 
@@ -917,11 +960,12 @@ impl CreditOracle {
     ) -> Result<(), CreditOracleError> {
         ensure_not_paused(&env)?;
         feeder.require_auth();
-        if !env
+        let is_trusted: bool = env
             .storage()
             .persistent()
-            .has(&DataKey::TrustedFeeder(feeder.clone()))
-        {
+            .get(&DataKey::TrustedFeeder(feeder.clone()))
+            .unwrap_or(false);
+        if !is_trusted {
             return Err(CreditOracleError::FeederNotRegistered);
         }
         let list_key = DataKey::VcList(user.clone());
@@ -1456,7 +1500,12 @@ impl CreditOracle {
         load_protocol_stats(&env)
     }
 
-    /// Returns all currently registered feeder addresses.
+    /// Returns all currently registered (non-deregistered) feeder addresses.
+    ///
+    /// `FeedersIndex` is append-only and holds every address ever
+    /// registered, so each entry is filtered against its `TrustedFeeder`
+    /// flag: only addresses whose flag is present and `true` are returned.
+    /// A deregistered feeder's tombstone flag reads `false` and is excluded.
     pub fn list_feeders(env: Env) -> Vec<Address> {
         let feeders: Vec<Address> = env
             .storage()
@@ -1465,9 +1514,13 @@ impl CreditOracle {
             .unwrap_or(Vec::new(&env));
 
         let mut active = Vec::new(&env);
-        for i in 0..feeders.len() {
-            let feeder: Address = feeders.get(i).unwrap();
-            if env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
+        for feeder in feeders.iter() {
+            let is_trusted: bool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TrustedFeeder(feeder.clone()))
+                .unwrap_or(false);
+            if is_trusted {
                 active.push_back(feeder);
             }
         }
@@ -1645,7 +1698,12 @@ impl CreditOracle {
         records
     }
 
-    /// Returns all currently registered lender addresses.
+    /// Returns all currently registered (non-deregistered) lender addresses.
+    ///
+    /// `LendersIndex` is append-only and holds every address ever
+    /// registered, so each entry is filtered against its `TrustedLender`
+    /// flag: only addresses whose flag is present and `true` are returned.
+    /// A deregistered lender's tombstone flag reads `false` and is excluded.
     pub fn list_lenders(env: Env) -> Vec<Address> {
         let lenders: Vec<Address> = env
             .storage()
@@ -1654,9 +1712,13 @@ impl CreditOracle {
             .unwrap_or(Vec::new(&env));
 
         let mut active = Vec::new(&env);
-        for i in 0..lenders.len() {
-            let lender: Address = lenders.get(i).unwrap();
-            if env.storage().persistent().has(&DataKey::TrustedLender(lender.clone())) {
+        for lender in lenders.iter() {
+            let is_trusted: bool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TrustedLender(lender.clone()))
+                .unwrap_or(false);
+            if is_trusted {
                 active.push_back(lender);
             }
         }
@@ -1731,6 +1793,49 @@ mod tests {
         );
 
         assert_eq!(score, 850);
+    }
+
+    #[test]
+    fn test_score_formula_readme_example_rows() {
+        // Pins every "Example scores" row in README.md (and the worked
+        // examples in docs/scoring-spec.md) to compute_score_pure so the
+        // documentation can never drift from the implementation again.
+
+        // Mirrors how compute_score derives vc_points (20 per VC, cap 100) and
+        // the default weights (40/30/30).
+        let row = |vcs: u32,
+                   volume_xlm: u32,
+                   repaid_xlm: u32,
+                   counterparties: u32,
+                   on_time: u32,
+                   total: u32|
+         -> u32 {
+            compute_score_pure(
+                vcs.saturating_mul(20).min(100),
+                volume_xlm as i128 * 100_000_000,
+                counterparties,
+                on_time,
+                total,
+                repaid_xlm as i128 * 100_000_000,
+                40,
+                30,
+                30,
+            )
+        };
+
+        // Established profile from the issue acceptance criteria:
+        // 2 VCs, 20 XLM volume, 20 XLM repaid, 0 counterparties, 85% on-time.
+        assert_eq!(row(2, 20, 20, 0, 17, 20), 503);
+
+        // New user: 0 VCs, no volume, no repayment record.
+        assert_eq!(row(0, 0, 0, 0, 0, 0), 300);
+        // Early stage: 1 VC, 5 XLM volume/repaid, 0 counterparties, 70% on-time.
+        assert_eq!(row(1, 5, 5, 0, 7, 10), 410);
+        // Established: covered above.
+        // Strong: 3 VCs, 50 XLM volume/repaid, 5 counterparties, 95% on-time.
+        assert_eq!(row(3, 50, 50, 5, 19, 20), 630);
+        // Exceptional: maxed VCs, volume, repaid, and counterparties, 100% on-time.
+        assert_eq!(row(5, 100, 100, 100, 20, 20), 850);
     }
 
     #[test]
@@ -2315,6 +2420,119 @@ mod tests {
         client.deregister_lender(&admin, &lender);
         let result = client.try_record_repayment(&lender, &subject, &1000, &true);
         assert_eq!(result, Err(Ok(CreditOracleError::LenderNotRegistered)));
+    }
+
+    #[test]
+    fn test_list_feeders_returns_only_currently_registered() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let feeder1 = Address::generate(&env);
+        let feeder2 = Address::generate(&env);
+
+        client.register_feeder(&admin, &feeder1);
+        client.register_feeder(&admin, &feeder2);
+        assert_eq!(
+            client.list_feeders(),
+            Vec::from_array(&env, [feeder1.clone(), feeder2.clone()])
+        );
+
+        client.deregister_feeder(&admin, &feeder1);
+
+        // Only the still-registered feeder is listed …
+        assert_eq!(
+            client.list_feeders(),
+            Vec::from_array(&env, [feeder2.clone()])
+        );
+
+        // … while FeedersIndex stays append-only (no removal on deregister).
+        let index_len: u32 = env.as_contract(&contract_id, || {
+            let index: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::FeedersIndex)
+                .unwrap_or(Vec::new(&env));
+            index.len()
+        });
+        assert_eq!(index_len, 2);
+    }
+
+    #[test]
+    fn test_list_lenders_returns_only_currently_registered() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let lender1 = Address::generate(&env);
+        let lender2 = Address::generate(&env);
+
+        client.register_lender(&admin, &lender1);
+        client.register_lender(&admin, &lender2);
+        assert_eq!(
+            client.list_lenders(),
+            Vec::from_array(&env, [lender1.clone(), lender2.clone()])
+        );
+
+        client.deregister_lender(&admin, &lender1);
+
+        // Only the still-registered lender is listed …
+        assert_eq!(
+            client.list_lenders(),
+            Vec::from_array(&env, [lender2.clone()])
+        );
+
+        // … while LendersIndex stays append-only (no removal on deregister).
+        let index_len: u32 = env.as_contract(&contract_id, || {
+            let index: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::LendersIndex)
+                .unwrap_or(Vec::new(&env));
+            index.len()
+        });
+        assert_eq!(index_len, 2);
+    }
+
+    #[test]
+    fn test_reregistering_deregistered_feeder_does_not_duplicate_index() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let feeder = Address::generate(&env);
+        client.register_feeder(&admin, &feeder);
+        client.deregister_feeder(&admin, &feeder);
+        client.register_feeder(&admin, &feeder);
+
+        // list_feeders must show the feeder exactly once even though it went
+        // through a register → deregister → register cycle, and the append-only
+        // FeedersIndex must hold it exactly once.
+        assert_eq!(
+            client.list_feeders(),
+            Vec::from_array(&env, [feeder.clone()])
+        );
+        let index_len: u32 = env.as_contract(&contract_id, || {
+            let index: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::FeedersIndex)
+                .unwrap_or(Vec::new(&env));
+            index.len()
+        });
+        assert_eq!(index_len, 1);
     }
 
     #[test]
