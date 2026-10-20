@@ -932,6 +932,18 @@ export class Feeder {
           `Soroban contract address (must start with 'C' and be 56 characters).`,
       );
     }
+
+    // #969: validate maxConsecutiveFailures at construction time. Must be >= 1.
+    if (config.maxConsecutiveFailures !== undefined) {
+      if (
+        !Number.isInteger(config.maxConsecutiveFailures) ||
+        config.maxConsecutiveFailures < 1
+      ) {
+        throw new Error(
+          `maxConsecutiveFailures must be >= 1 (got ${config.maxConsecutiveFailures})`,
+        );
+      }
+    }
     this.server = new SorobanRpc.Server(config.rpcUrl);
   }
 
