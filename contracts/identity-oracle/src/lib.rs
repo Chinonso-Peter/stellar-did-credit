@@ -478,6 +478,17 @@ impl IdentityOracle {
         Ok(())
     }
 
+    /// Returns true if the contract is paused.
+    ///
+    /// Returns `false` before `pause` has ever been called (the `Paused` key
+    /// is simply absent from instance storage).
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
     /// Upgrade the storage layout to the latest version.
     ///
     /// Auth: admin only — verified via `require_admin`.
@@ -2075,6 +2086,26 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         assert_eq!(client.get_admin(), Some(admin));
+    }
+
+    #[test]
+    fn test_is_paused_default_false_and_pause_unpause() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        assert!(!client.is_paused());
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        assert!(!client.is_paused());
+
+        client.pause();
+        assert!(client.is_paused());
+
+        client.unpause();
+        assert!(!client.is_paused());
     }
 
     #[test]

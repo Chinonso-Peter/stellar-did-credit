@@ -2257,12 +2257,63 @@ describe("Feeder config: revocationRegistryId validation", () => {
         new Feeder(
           {
             ...baseConfig,
-            revocationRegistryId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+            revocationRegistryId: "C" + "A".repeat(55),
           },
           keypair,
         ),
     ).not.toThrow();
   });
+});
+
+// ---------------------------------------------------------------------------
+// #969: maxConsecutiveFailures config validation
+// ---------------------------------------------------------------------------
+
+describe("Feeder config: maxConsecutiveFailures validation (#969)", () => {
+  const baseConfig: FeederConfig = { ...config };
+  const keypair = { publicKey: () => "GFEEDER" } as any;
+
+  it("accepts a Feeder when maxConsecutiveFailures is omitted (field is optional)", () => {
+    expect(() => new Feeder(baseConfig, keypair)).not.toThrow();
+  });
+
+  it("accepts maxConsecutiveFailures === 1", () => {
+    expect(() => new Feeder({ ...baseConfig, maxConsecutiveFailures: 1 }, keypair)).not.toThrow();
+  });
+
+  it("accepts a positive integer > 1", () => {
+    expect(() => new Feeder({ ...baseConfig, maxConsecutiveFailures: 10 }, keypair)).not.toThrow();
+  });
+
+  it("rejects maxConsecutiveFailures === 0", () => {
+    expect(() => new Feeder({ ...baseConfig, maxConsecutiveFailures: 0 }, keypair)).toThrow(
+      /maxConsecutiveFailures must be >= 1/,
+    );
+  });
+
+  it("rejects negative maxConsecutiveFailures", () => {
+    expect(() => new Feeder({ ...baseConfig, maxConsecutiveFailures: -1 }, keypair)).toThrow(
+      /maxConsecutiveFailures must be >= 1/,
+    );
+  });
+
+  it("rejects non-integer maxConsecutiveFailures", () => {
+    expect(() => new Feeder({ ...baseConfig, maxConsecutiveFailures: 2.5 }, keypair)).toThrow(
+      /maxConsecutiveFailures must be >= 1/,
+    );
+  });
+
+  it("names the field and requirement in the error message", () => {
+    expect(() => new Feeder({ ...baseConfig, maxConsecutiveFailures: 0 }, keypair)).toThrow(
+      /maxConsecutiveFailures must be >= 1 \(got 0\)/,
+    );
+  });
+});
+
+
+describe("Feeder config: revocationRegistryId optional", () => {
+  const baseConfig: FeederConfig = { ...config };
+  const keypair = { publicKey: () => "GAAAA" } as unknown as Keypair;
 
   it("accepts an omitted revocationRegistryId (optional field)", () => {
     expect(() => new Feeder(baseConfig, keypair)).not.toThrow();
